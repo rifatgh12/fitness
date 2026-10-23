@@ -64,17 +64,17 @@ Setelah web terbuka di browser HP Anda:
 ## ☁️ Sinkronisasi Data Antar-Perangkat (Laptop ⟷ HP)
 Agar catatan makan, jadwal gym, dan berat badan Anda otomatis sama antara laptop dan HP:
 
-1. Buka tab **Pengaturan** di web OtotKu.
-2. Di bagian **Sinkronisasi Cloud (Supabase / Firebase)**:
-   - Pilih penyedia database (misalnya **Supabase**, gratis & disarankan).
-   - Masukkan **Supabase URL** dan **Anon Key** Anda (ada panduan 2 menit di dalam aplikasi).
-   - Buat **Kunci Pengguna / ID Sinkronisasi** (misal: `rifat_gym_2026`).
-3. Di HP Anda, buka tab Pengaturan yang sama, lalu masukkan **Kunci Pengguna** yang persis sama.
-4. Setiap kali Anda selesai latihan gym atau mencatat makanan di HP, data otomatis tersinkronisasi ke laptop Anda secara realtime!
+👉 **Cara Termudah (Otomatis):**
+1. Buka file `supabase-config.js` di laptop Anda.
+2. Masukkan `url` dan `anonKey` Supabase Anda.
+3. Begitu disimpan, **SEMUA perangkat (Laptop & HP)** langsung otomatis terhubung tanpa perlu repot mengetik kunci panjang di HP!
+4. Panduan lengkap dan skrip SQL Supabase ada di file `PANDUAN_SUPABASE.md`.
 
 ---
 
 ## 🛠️ File-File Pendukung yang Dibuat:
+- `supabase-config.js` : Konfigurasi global database Supabase (auto-sync semua device).
+- `PANDUAN_SUPABASE.md` : Panduan lengkap pengaturan database & skrip SQL Supabase.
 - `jalankan_server.bat` : Launcher 1-klik untuk Windows.
 - `serve.py` : Script server lokal dengan deteksi IP otomatis dan QR Code di terminal.
 - `manifest.json` : Konfigurasi PWA agar aplikasi bisa di-instal di Android & iOS.

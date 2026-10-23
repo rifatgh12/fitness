@@ -22,7 +22,7 @@
 <!-- Chart.js dari cdnjs -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
 <!-- Supabase Client CDN -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <!-- Firebase Compat SDK CDN -->
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js" defer></script>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js" defer></script>
@@ -776,6 +776,16 @@ function normalizeState(raw) {
   if (!raw || typeof raw !== 'object') return base;
   const obj = v => v && typeof v === 'object' && !Array.isArray(v);
   const cloud = { ...base.settings.cloud, ...(obj(raw.settings?.cloud) ? raw.settings.cloud : {}) };
+  // Timpa dengan konfigurasi global dari supabase-config.js jika ada
+  if (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
+    cloud.supabaseUrl = window.SUPABASE_CONFIG.url.trim();
+    cloud.supabaseKey = window.SUPABASE_CONFIG.anonKey.trim();
+    if (window.SUPABASE_CONFIG.syncKey && (!cloud.syncKey || cloud.syncKey.startsWith('otot_'))) {
+      cloud.syncKey = window.SUPABASE_CONFIG.syncKey.trim();
+    }
+    cloud.enabled = true;
+    cloud.provider = 'supabase';
+  }
   return {
     ...base,
     sampleLoaded: !!raw.sampleLoaded,
@@ -854,6 +864,8 @@ const Cloud = {
   status: 'offline', // 'offline' | 'ready' | 'syncing' | 'error'
   statusMsg: 'Lokal',
   _debounceTimer: null,
+  _realtimeChannel: null,
+  _lastPushTime: 0,
 
   init() {
     this.setupClient();
@@ -863,7 +875,21 @@ const Cloud = {
   },
 
   setupClient() {
+    state.settings = state.settings || {};
+    state.settings.cloud = state.settings.cloud || {};
     const c = state.settings.cloud;
+
+    // Baca konfigurasi global jika ada di window.SUPABASE_CONFIG
+    if (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
+      if (!c.supabaseUrl) c.supabaseUrl = window.SUPABASE_CONFIG.url.trim();
+      if (!c.supabaseKey) c.supabaseKey = window.SUPABASE_CONFIG.anonKey.trim();
+      if (window.SUPABASE_CONFIG.syncKey && (!c.syncKey || c.syncKey.startsWith('otot_'))) {
+        c.syncKey = window.SUPABASE_CONFIG.syncKey.trim();
+      }
+      c.enabled = true;
+      c.provider = 'supabase';
+    }
+
     if (!c || !c.enabled) {
       this.client = null;
       this.status = 'offline';
@@ -878,6 +904,7 @@ const Cloud = {
           this.client = window.supabase.createClient(c.supabaseUrl.trim(), c.supabaseKey.trim());
           this.status = 'ready';
           this.statusMsg = 'Supabase Aktif';
+          this.subscribeRealtime();
         } catch (e) {
           console.error('Supabase init error:', e);
           this.status = 'error';
@@ -885,7 +912,7 @@ const Cloud = {
         }
       } else {
         this.status = 'offline';
-        this.statusMsg = 'Supabase belum lengkap';
+        this.statusMsg = c.supabaseUrl ? 'Supabase memuat...' : 'Supabase belum lengkap';
       }
     } else if (c.provider === 'firebase') {
       if (typeof window.firebase !== 'undefined' && c.firebaseConfig) {
@@ -927,6 +954,121 @@ const Cloud = {
     );
   },
 
+  subscribeRealtime() {
+    if (!this.client || state.settings?.cloud?.provider !== 'supabase') return;
+    const syncKey = (state.settings?.cloud?.syncKey || 'default_user').trim();
+    if (this._realtimeChannel) {
+      try { this.client.removeChannel(this._realtimeChannel); } catch (e) {}
+      this._realtimeChannel = null;
+    }
+    try {
+      this._realtimeChannel = this.client
+        .channel('ototku-sync-' + syncKey)
+        .on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table: 'ototku_sync',
+          filter: `user_id=eq.${syncKey}`
+        }, payload => {
+          if (payload && payload.new && payload.new.data) {
+            // Hindari menimpa jika kita baru saja push sendiri kurang dari 2.5 detik lalu
+            if (this._lastPushTime && Date.now() - this._lastPushTime < 2500) return;
+            const remote = payload.new.data;
+            const currentCloudConf = clone(state.settings.cloud);
+            state = normalizeState(remote);
+            state.settings.cloud = currentCloudConf;
+            state.settings.cloud.lastSyncedAt = new Date().toISOString();
+            Store.saveLocal();
+            this.status = 'ready';
+            this.statusMsg = 'Tersinkron Live';
+            this.updateBadge();
+            renderCurrent();
+            toast('⚡ Data sinkron dari perangkat lain!', 'ok');
+          }
+        })
+        .subscribe();
+    } catch (e) {
+      console.warn('Realtime subscription error:', e);
+    }
+  },
+
+  async testConnection() {
+    this.setupClient();
+    const c = state.settings.cloud;
+    if (!c.supabaseUrl || !c.supabaseKey) {
+      return { ok: false, msg: 'Supabase URL dan Anon Key belum diisi.' };
+    }
+    if (typeof window.supabase === 'undefined') {
+      return { ok: false, msg: 'Library Supabase CDN belum selesai dimuat. Pastikan ada koneksi internet.' };
+    }
+    if (!this.client) {
+      try {
+        this.client = window.supabase.createClient(c.supabaseUrl.trim(), c.supabaseKey.trim());
+      } catch (e) {
+        return { ok: false, msg: 'Format URL/Key tidak valid: ' + (e.message || e) };
+      }
+    }
+    try {
+      const syncKey = (c.syncKey || 'default_user').trim();
+      const { data, error } = await this.client
+        .from('ototku_sync')
+        .select('user_id, updated_at')
+        .eq('user_id', syncKey)
+        .maybeSingle();
+
+      if (error) {
+        if (error.code === '42P01' || error.message?.includes('ototku_sync') || error.message?.includes('relation')) {
+          return {
+            ok: false,
+            code: 'TABLE_MISSING',
+            msg: 'Tabel "ototku_sync" belum dibuat di Supabase. Silakan jalankan skrip SQL di Supabase SQL Editor.'
+          };
+        }
+        if (error.code === '42501' || error.message?.includes('permission') || error.message?.includes('policy')) {
+          return {
+            ok: false,
+            code: 'RLS_DENIED',
+            msg: 'Akses ditolak oleh RLS Supabase. Pastikan kebijakan "Public Access" sudah dibuat.'
+          };
+        }
+        return { ok: false, msg: 'Error Supabase: ' + (error.message || JSON.stringify(error)) };
+      }
+
+      // Berhasil baca, lakukan ping tulis
+      const payload = {
+        app: 'OtotKu',
+        updatedAt: new Date().toISOString(),
+        version: state.version || 1,
+        settings: state.settings,
+        foods: state.foods,
+        template: state.template,
+        program: state.program,
+        meals: state.meals,
+        sessions: state.sessions,
+        bodyLogs: state.bodyLogs,
+      };
+
+      const writeRes = await this.client
+        .from('ototku_sync')
+        .upsert({ user_id: syncKey, data: payload, updated_at: new Date().toISOString() });
+
+      if (writeRes.error) {
+        return { ok: false, msg: 'Gagal menulis data: ' + writeRes.error.message };
+      }
+
+      c.enabled = true;
+      c.lastSyncedAt = new Date().toISOString();
+      Store.saveLocal();
+      this.subscribeRealtime();
+      this.status = 'ready';
+      this.statusMsg = 'Supabase Terhubung';
+      this.updateBadge();
+      return { ok: true, msg: '🎉 Berhasil! Terhubung ke database Supabase & siap sinkronisasi antar-perangkat!' };
+    } catch (e) {
+      return { ok: false, msg: 'Gagal tes koneksi: ' + (e.message || e) };
+    }
+  },
+
   async push({ manual = false } = {}) {
     const c = state.settings.cloud;
     if (!this.client || !c?.enabled) {
@@ -939,6 +1081,7 @@ const Cloud = {
     this.updateBadge();
 
     try {
+      this._lastPushTime = Date.now();
       const payload = {
         app: 'OtotKu',
         updatedAt: new Date().toISOString(),
@@ -994,8 +1137,8 @@ const Cloud = {
           .from('ototku_sync')
           .select('data, updated_at')
           .eq('user_id', syncKey)
-          .single();
-        if (error && error.code !== 'PGRST116') throw error;
+          .maybeSingle();
+        if (error) throw error;
         cloudData = data ? data.data : null;
       } else if (c.provider === 'firebase') {
         const snap = await this.client.ref('ototku/' + syncKey).once('value');
@@ -2039,6 +2182,12 @@ function renderSettings() {
       </div>
 
       <form data-form="cloudSettings" id="cloudSettingsForm">
+        ${window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url ? `
+        <div style="background:var(--ok-soft);color:var(--ok);padding:10px 14px;border-radius:12px;font-size:.84rem;font-weight:600;margin-bottom:14px;display:flex;align-items:center;gap:8px">
+          <span style="font-size:1.1rem">⚡</span>
+          <span><b>supabase-config.js terhubung:</b> Semua perangkat yang membuka aplikasi ini langsung otomatis tersinkron!</span>
+        </div>` : ''}
+
         <div class="field mb">
           <span>Pilih Provider Database:</span>
           ${seg([['supabase', '⚡ Supabase (Rekomendasi)'], ['firebase', '🔥 Firebase']], c.provider || 'supabase', 'cloudProviderSelect')}
@@ -2067,19 +2216,21 @@ function renderSettings() {
             <input class="input" type="password" name="supabaseKey" value="${esc(c.supabaseKey || '')}" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
           </label>
           <div class="hint">
-            <b>Panduan Cepat Supabase (Gratis 2 Menit):</b>
+            <b>Panduan Cepat Supabase:</b>
             <ol style="padding-left:18px;margin-top:4px">
               <li>Buka <a href="https://supabase.com" target="_blank" rel="noopener noreferrer" style="color:var(--primary);font-weight:700">supabase.com</a> dan buat project baru gratis.</li>
-              <li>Salin <b>Project URL</b> dan <b>Anon Key</b> dari menu <i>Project Settings → API</i>.</li>
-              <li>Buka menu <b>SQL Editor</b> di Supabase, lalu salin dan jalankan skrip tabel di bawah ini:</li>
+              <li>Salin <b>Project URL</b> dan <b>Anon Key</b> dari menu <i>Project Settings → API</i> (atau edit langsung di file <code>supabase-config.js</code>).</li>
+              <li>Buka menu <b>SQL Editor</b> di Supabase, lalu salin dan jalankan skrip SQL di bawah ini:</li>
             </ol>
-            <div class="code-box" id="supabaseSqlSnippet">create table if not exists ototku_sync (
+            <div class="code-box" id="supabaseSqlSnippet">create table if not exists public.ototku_sync (
   user_id text primary key,
   data jsonb not null,
   updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
-alter table ototku_sync enable row level security;
-create policy "Public Access" on ototku_sync for all using (true) with check (true);</div>
+alter table public.ototku_sync enable row level security;
+drop policy if exists "Public Access" on public.ototku_sync;
+create policy "Public Access" on public.ototku_sync for all to anon, authenticated using (true) with check (true);
+alter publication supabase_realtime add table public.ototku_sync;</div>
             <button type="button" class="btn btn-sm btn-soft mt" data-action="copySqlSnippet">📋 Salin Skrip SQL</button>
           </div>
         </div>
@@ -2102,8 +2253,9 @@ create policy "Public Access" on ototku_sync for all using (true) with check (tr
           </label>
         </div>
 
-        <div class="btn-row mt">
-          <button class="btn btn-primary grow" type="submit" id="saveCloudBtn">💾 Simpan Konfigurasi Cloud</button>
+        <div class="btn-row wrap mt">
+          <button class="btn btn-primary grow" type="submit" id="saveCloudBtn">💾 Simpan Konfigurasi</button>
+          <button class="btn btn-soft" type="button" data-action="testSupabaseConn" id="testSupabaseBtn">🧪 Tes Koneksi Supabase</button>
           <button class="btn" type="button" data-action="testSyncNow" id="testSyncBtn">🔄 Sinkronkan Sekarang</button>
         </div>
         ${c.lastSyncedAt ? `<p class="muted small mt" style="text-align:right">Terakhir sinkron: ${new Date(c.lastSyncedAt).toLocaleString('id-ID')}</p>` : ''}
@@ -2509,6 +2661,29 @@ const actions = {
     $('#supabaseFields').style.display = prov === 'supabase' ? '' : 'none';
     $('#firebaseFields').style.display = prov === 'firebase' ? '' : 'none';
     $$('[data-action="cloudProviderSelect"]').forEach(b => b.classList.toggle('active', b.dataset.value === prov));
+  },
+  testSupabaseConn: async el => {
+    const orig = el.innerHTML;
+    el.innerHTML = '⏳ Mengetes koneksi...';
+    el.disabled = true;
+    try {
+      const res = await Cloud.testConnection();
+      if (res.ok) {
+        toast(res.msg, 'ok');
+      } else {
+        toast(res.msg, 'bad');
+        if (res.code === 'TABLE_MISSING' || res.code === 'RLS_DENIED') {
+          setTimeout(() => {
+            $('#supabaseSqlSnippet')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }, 300);
+        }
+      }
+    } catch (e) {
+      toast('Gagal tes koneksi: ' + (e.message || e), 'bad');
+    } finally {
+      el.innerHTML = orig;
+      el.disabled = false;
+    }
   },
   testSyncNow: async () => {
     toast('🔄 Menghubungkan ke Cloud...', '');

@@ -1,9 +1,10 @@
 /* OtotKu - Service Worker for Offline & PWA Support */
-const CACHE_NAME = 'ototku-cache-v1';
+const CACHE_NAME = 'ototku-cache-v2';
 const CORE_ASSETS = [
   './',
   './index.html',
   './manifest.json',
+  './supabase-config.js',
   './qrcode.min.js',
   './icon.svg',
   './icon-192.png',
@@ -43,8 +44,13 @@ self.addEventListener('fetch', event => {
   const req = event.request;
   const url = new URL(req.url);
 
-  // Skip non-GET and chrome-extension / non-http requests
-  if (req.method !== 'GET' || !url.protocol.startsWith('http')) {
+  // Lewati request non-GET atau request ke Cloud API (Supabase & Firebase) agar data selalu realtime
+  if (
+    req.method !== 'GET' ||
+    !url.protocol.startsWith('http') ||
+    url.hostname.includes('supabase.co') ||
+    url.hostname.includes('firebaseio.com')
+  ) {
     return;
   }
 
