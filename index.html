@@ -16,13 +16,15 @@
 <meta name="mobile-web-app-capable" content="yes">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<!-- Konfigurasi Cloud Database Global -->
+<script src="supabase-config.js"></script>
 <!-- Offline QR Code Generator -->
 <script src="qrcode.min.js" defer></script>
 <!-- Chart.js dari cdnjs -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" defer></script>
-<!-- Supabase Client CDN -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- Supabase Client (Lokal Offline dengan Fallback CDN) -->
+<script src="supabase.min.js"></script>
+<script>if(typeof window.supabase==='undefined')document.write('<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"><\\/script>')</script>
 <!-- Firebase Compat SDK CDN -->
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js" defer></script>
 <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js" defer></script>
@@ -501,11 +503,11 @@ const DEFAULT_SETTINGS = {
   dumbbells: [6, 8, 9, 10, 15, 20],
   theme: 'auto',
   cloud: {
-    enabled: false,
+    enabled: !!(window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url),
     provider: 'supabase', // 'supabase' | 'firebase'
-    syncKey: 'otot_' + Math.random().toString(36).slice(2, 9),
-    supabaseUrl: '',
-    supabaseKey: '',
+    syncKey: (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.syncKey) || ('otot_' + Math.random().toString(36).slice(2, 9)),
+    supabaseUrl: (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url) || '',
+    supabaseKey: (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.anonKey) || '',
     firebaseConfig: '',
     autoSync: true,
     lastSyncedAt: null,
@@ -758,7 +760,7 @@ function seededRandom(seed) { return () => { seed = (seed * 16807) % 2147483647;
    3. PENYIMPANAN & STATE
    ========================================================= */
 function createDefaultState() {
-  return {
+  const base = {
     version: 1,
     settings: clone(DEFAULT_SETTINGS),
     foods: clone(DEFAULT_FOODS),
@@ -769,6 +771,16 @@ function createDefaultState() {
     bodyLogs: [],
     sampleLoaded: false,
   };
+  if (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
+    base.settings.cloud.supabaseUrl = window.SUPABASE_CONFIG.url.trim();
+    base.settings.cloud.supabaseKey = window.SUPABASE_CONFIG.anonKey.trim();
+    if (window.SUPABASE_CONFIG.syncKey) {
+      base.settings.cloud.syncKey = window.SUPABASE_CONFIG.syncKey.trim();
+    }
+    base.settings.cloud.enabled = true;
+    base.settings.cloud.provider = 'supabase';
+  }
+  return base;
 }
 
 function normalizeState(raw) {
@@ -780,7 +792,7 @@ function normalizeState(raw) {
   if (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
     cloud.supabaseUrl = window.SUPABASE_CONFIG.url.trim();
     cloud.supabaseKey = window.SUPABASE_CONFIG.anonKey.trim();
-    if (window.SUPABASE_CONFIG.syncKey && (!cloud.syncKey || cloud.syncKey.startsWith('otot_'))) {
+    if (window.SUPABASE_CONFIG.syncKey) {
       cloud.syncKey = window.SUPABASE_CONFIG.syncKey.trim();
     }
     cloud.enabled = true;
@@ -881,9 +893,9 @@ const Cloud = {
 
     // Baca konfigurasi global jika ada di window.SUPABASE_CONFIG
     if (window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
-      if (!c.supabaseUrl) c.supabaseUrl = window.SUPABASE_CONFIG.url.trim();
-      if (!c.supabaseKey) c.supabaseKey = window.SUPABASE_CONFIG.anonKey.trim();
-      if (window.SUPABASE_CONFIG.syncKey && (!c.syncKey || c.syncKey.startsWith('otot_'))) {
+      c.supabaseUrl = window.SUPABASE_CONFIG.url.trim();
+      c.supabaseKey = window.SUPABASE_CONFIG.anonKey.trim();
+      if (window.SUPABASE_CONFIG.syncKey) {
         c.syncKey = window.SUPABASE_CONFIG.syncKey.trim();
       }
       c.enabled = true;
@@ -910,9 +922,31 @@ const Cloud = {
           this.status = 'error';
           this.statusMsg = 'Gagal Supabase';
         }
+      } else if (c.supabaseUrl && c.supabaseKey) {
+        this.status = 'syncing';
+        this.statusMsg = 'Menghubungkan...';
+        this.updateBadge();
+        if (!this._retryTimer) {
+          let attempts = 0;
+          this._retryTimer = setInterval(() => {
+            attempts++;
+            if (typeof window.supabase !== 'undefined') {
+              clearInterval(this._retryTimer);
+              this._retryTimer = null;
+              this.setupClient();
+              if (c.autoSync) this.pull({ silent: true });
+            } else if (attempts > 25) {
+              clearInterval(this._retryTimer);
+              this._retryTimer = null;
+              this.status = 'error';
+              this.statusMsg = 'Gagal memuat script Supabase';
+              this.updateBadge();
+            }
+          }, 400);
+        }
       } else {
         this.status = 'offline';
-        this.statusMsg = c.supabaseUrl ? 'Supabase memuat...' : 'Supabase belum lengkap';
+        this.statusMsg = 'Supabase belum lengkap';
       }
     } else if (c.provider === 'firebase') {
       if (typeof window.firebase !== 'undefined' && c.firebaseConfig) {
@@ -3043,7 +3077,9 @@ function init() {
   // Registrasi Service Worker untuk PWA & Caching Offline
   if ('serviceWorker' in navigator && (location.protocol === 'http:' || location.protocol === 'https:')) {
     window.addEventListener('load', () => {
-      navigator.serviceWorker.register('./sw.js').catch(err => {
+      navigator.serviceWorker.register('./sw.js').then(reg => {
+        try { reg.update(); } catch(e) {}
+      }).catch(err => {
         console.warn('PWA ServiceWorker error:', err);
       });
     });

@@ -1,10 +1,11 @@
 /* OtotKu - Service Worker for Offline & PWA Support */
-const CACHE_NAME = 'ototku-cache-v2';
+const CACHE_NAME = 'ototku-cache-v3';
 const CORE_ASSETS = [
   './',
   './index.html',
   './manifest.json',
   './supabase-config.js',
+  './supabase.min.js',
   './qrcode.min.js',
   './icon.svg',
   './icon-192.png',
@@ -24,7 +25,7 @@ self.addEventListener('install', event => {
   );
 });
 
-// Activate: Clean up previous version caches
+// Activate: Clean up previous version caches immediately
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => {
@@ -39,7 +40,7 @@ self.addEventListener('activate', event => {
   );
 });
 
-// Fetch: Network-first for dynamic, Cache-first / stale-while-revalidate for static assets
+// Fetch handler
 self.addEventListener('fetch', event => {
   const req = event.request;
   const url = new URL(req.url);
@@ -54,12 +55,26 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Handle local files & CDN scripts
+  // 1. Khusus Dokumen HTML / Navigasi: NETWORK-FIRST agar HP selalu memuat kode terbaru dari laptop
+  if (req.mode === 'navigate' || req.headers.get('accept')?.includes('text/html')) {
+    event.respondWith(
+      fetch(req).then(networkResponse => {
+        if (networkResponse && networkResponse.status === 200) {
+          const resClone = networkResponse.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(req, resClone));
+        }
+        return networkResponse;
+      }).catch(() => {
+        return caches.match('./index.html') || caches.match('./');
+      })
+    );
+    return;
+  }
+
+  // 2. Aset Statis (JS, CSS, Gambar, Ikon): Cache-First dengan background update
   event.respondWith(
     caches.match(req).then(cachedResponse => {
-      // Fetch from network in background or foreground
       const fetchPromise = fetch(req).then(networkResponse => {
-        // Cache valid responses for static assets and CDNs
         if (networkResponse && networkResponse.status === 200) {
           const responseToCache = networkResponse.clone();
           caches.open(CACHE_NAME).then(cache => {
@@ -67,15 +82,8 @@ self.addEventListener('fetch', event => {
           });
         }
         return networkResponse;
-      }).catch(err => {
-        // If offline and request is HTML navigation, fallback to index.html
-        if (req.mode === 'navigate') {
-          return caches.match('./index.html');
-        }
-        return null;
-      });
+      }).catch(() => null);
 
-      // If we have cached version, return it right away; otherwise wait for network
       return cachedResponse || fetchPromise;
     })
   );
